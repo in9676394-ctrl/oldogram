@@ -63,7 +63,7 @@ jobs:
               '\npackages:\n'
               '  TDLibFramework:\n'
               '    url: https://github.com/Swiftgram/TDLibFramework.git\n'
-              '    branch: master\n'
+              '    branch: main\n'
           )
           if 'packages:' not in content:
               content += packages_block
@@ -186,7 +186,7 @@ jobs:
               '\npackages:\n'
               '  TDLibFramework:\n'
               '    url: https://github.com/Swiftgram/TDLibFramework.git\n'
-              '    branch: master\n'
+              '    branch: main\n'
           )
           if 'packages:' not in content:
               content += packages_block
