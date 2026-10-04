@@ -1,117 +1,62 @@
 # TelegramLite — CI build & .ipa packaging
 #
-# This workflow:
-#   1. Runs on a GitHub-hosted macOS runner (free for public repos).
-#   2. Installs XcodeGen + CocoaPods.
-#   3. Downloads the official prebuilt TDLib iOS binary.
-#   4. Generates the .xcodeproj from project.yml.
-#   5. Builds an unsigned .app and packages it as an unsigned .ipa.
-#   6. Uploads the .ipa as a build artifact (downloadable from the Actions tab).
+# Strategy:
+#   - macos-14 runner (currently available, Xcode 15)
+#   - Build the project WITHOUT TDLib linked. The Swift code uses
+#     dlopen(nil, RTLD_LAZY) so it still compiles and runs — it just
+#     runs in "mock mode" (login screen shows but won't connect).
+#   - Produces an unsigned .ipa as a build artifact.
 #
-# To produce a SIGNED .ipa that can install on real devices:
-#   1. Get an Apple Developer Account ($99/year).
-#   2. Issue a "Development" or "Distribution" certificate + provisioning
-#      profile for bundle id `app.lite.telegramlite`.
-#   3. Export the certificate + private key as a .p12 file, set a password.
-#   4. In your GitHub repo, go to Settings → Secrets and Variables → Actions,
-#      and add:
-#        APPLE_CERT_BASE64   (base64 of your .p12)
-#        APPLE_CERT_PASSWORD  (the .p12 password)
-#        APPLE_PROV_PROFILE_BASE64 (base64 of your .mobileprovision)
-#        APPLE_TEAM_ID        (e.g. ABC123XYZ9)
-#   5. Trigger the workflow via "Run workflow" button (workflow_dispatch).
+# To make the app ACTUALLY connect to Telegram:
+#   1. Drop libtdjson.xcframework into TelegramLite/Frameworks/
+#   2. Uncomment the `dependencies:` block in project.yml
+#   3. Push — workflow rebuilds with TDLib linked.
 #
-# Without those secrets, the workflow still builds — you get an unsigned
-# .ipa usable on jailbroken devices, in the iOS Simulator, or for analysis.
+# To produce a SIGNED .ipa for real device install (Apple Dev $99/yr):
+#   Add secrets APPLE_CERT_BASE64, APPLE_CERT_PASSWORD,
+#   APPLE_PROV_PROFILE_BASE64, APPLE_TEAM_ID — then run via
+#   workflow_dispatch.
 
 name: Build TelegramLite .ipa
 
 on:
   push:
     branches: [ main, master ]
-    tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
 
 env:
-  XCODE_VERSION: '14.2'
   SCHEME: TelegramLite
   CONFIGURATION: Release
-  # TDLib prebuilt binary from official Telegram releases.
-  # Find the latest at: https://github.com/tdlib/td/releases
-  TDLIB_VERSION: '1.8.32'
 
 jobs:
   build:
     name: Build .ipa
-    runs-on: macos-12
+    runs-on: macos-14
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+      - name: Show runner info
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcode-select -p
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Create Frameworks directory
-        run: mkdir -p TelegramLite/Frameworks
-
-      - name: Download prebuilt TDLib
-        run: |
-          set -ex
-          # The TDLib project publishes prebuilt iOS binaries as `libtdjson.xcframework`.
-          # If the URL below changes (re-tag), look for the right asset at
-          # https://github.com/tdlib/td/releases — pick `tdlib-vX.Y.Z-ios-arm64-arm64_x86_64-simulator.zip`
-          # or whatever artifact matches your build target.
-          URL="https://github.com/tdlib/td/releases/download/v${TDLIB_VERSION}/tdlib-v${TDLIB_VERSION}-ios-arm64-arm64_x86_64-simulator.zip"
-          echo "Fetching $URL"
-          curl -L -sS -o td.zip "$URL"
-          unzip -o td.zip -d tdlib_extract
-          find tdlib_extract -name 'libtdjson.xcframework' -type d | head -n1
-          mv $(find tdlib_extract -name 'libtdjson.xcframework' -type d | head -n1) TelegramLite/Frameworks/
-          ls -la TelegramLite/Frameworks/
-
-      - name: Patch project.yml to link TDLib framework
-        run: |
-          # Uncomment the dependencies block by removing the leading '#' chars
-          # from the `dependencies:` / `framework:` lines.
-          python3 - <<'PY'
-          import re
-          with open('project.yml', 'r') as f:
-              content = f.read()
-          # Find the trailing commented block and uncomment it.
-          content = content.replace(
-              '# Uncomment after dropping libtdjson.xcframework into TelegramLite/Frameworks/\n'
-              '# dependencies:\n'
-              '#   - framework: TelegramLite/Frameworks/libtdjson.xcframework\n'
-              '#     embed: true\n'
-              '#     codeSignOnCopy: true\n',
-              'dependencies:\n'
-              '  - framework: TelegramLite/Frameworks/libtdjson.xcframework\n'
-              '    embed: true\n'
-              '    codeSignOnCopy: true\n'
-          )
-          with open('project.yml', 'w') as f:
-              f.write(content)
-          print('Patched project.yml to enable TDLib framework linking.')
-          PY
-
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Resolve SwiftPM dependencies (no-op if none)
-        run: |
-          xcodebuild -project TelegramLite.xcodeproj \
-                     -scheme "$SCHEME" \
-                     -configuration "$CONFIGURATION" \
-                     -resolvePackageDependencies || true
+      - name: Show available simulators (sanity)
+        run: xcrun simctl list devices available | head -20
 
-      - name: Build (unsigned)
+      - name: Build .app (unsigned, no TDLib linked — mock mode)
         run: |
+          set -ex
           mkdir -p build
           xcodebuild \
             -project TelegramLite.xcodeproj \
@@ -124,12 +69,23 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            build
+            DEVELOPMENT_TEAM="" \
+            build 2>&1 | tee build/build.log
+
+      - name: Locate .app
+        run: |
+          APP_PATH=$(find build/DerivedData/Build/Products -name 'TelegramLite.app' -type d | head -n1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::TelegramLite.app not found — build failed."
+            tail -100 build/build.log
+            exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          ls -la "$APP_PATH"
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
 
       - name: Package unsigned .ipa
         run: |
-          APP_PATH=$(find build/DerivedData/Build/Products -name 'TelegramLite.app' -type d | head -n1)
-          echo "Found app: $APP_PATH"
           mkdir -p build/Payload
           cp -R "$APP_PATH" build/Payload/
           cd build
@@ -137,15 +93,57 @@ jobs:
           cd ..
           ls -lh TelegramLite-unsigned.ipa
 
-      - name: Sign & package signed .ipa (only when secrets are set)
-        if: ${{ github.event_name == 'workflow_dispatch' && secrets.APPLE_CERT_BASE64 != '' }}
+      - name: Upload unsigned .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: TelegramLite-unsigned-ipa
+          path: TelegramLite-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build/build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  sign:
+    name: Sign .ipa (optional, manual trigger only)
+    runs-on: macos-14
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fail early if signing secrets not set
+        env:
+          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
+          APPLE_PROV_PROFILE_BASE64: ${{ secrets.APPLE_PROV_PROFILE_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERT_BASE64" ] || [ -z "$APPLE_PROV_PROFILE_BASE64" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::error::Add secrets APPLE_CERT_BASE64, APPLE_PROV_PROFILE_BASE64, APPLE_TEAM_ID before triggering this job."
+            exit 1
+          fi
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Decode signing materials
         env:
           APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
           APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
           APPLE_PROV_PROFILE_BASE64: ${{ secrets.APPLE_PROV_PROFILE_BASE64 }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -ex
+          mkdir -p build
           echo "$APPLE_CERT_BASE64" | base64 -d > build/dev.p12
           echo "$APPLE_PROV_PROFILE_BASE64" | base64 -d > build/dev.mobileprovision
 
@@ -161,6 +159,10 @@ jobs:
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp build/dev.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/dev.mobileprovision
 
+      - name: Build signed .app
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
           xcodebuild \
             -project TelegramLite.xcodeproj \
             -scheme "$SCHEME" \
@@ -175,29 +177,22 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="dev" \
             build
 
+      - name: Package signed .ipa
+        run: |
           APP_PATH=$(find build/DerivedDataSigned/Build/Products -name 'TelegramLite.app' -type d | head -n1)
-
           mkdir -p build/PayloadSigned
           cp -R "$APP_PATH" build/PayloadSigned/
           cd build/PayloadSigned
           zip -r -q ../../TelegramLite-signed.ipa Payload
-          cd ../..
 
-          security delete-keychain "$KEYCHAIN" || true
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain build/app.keychain || true
 
-      - name: Upload unsigned .ipa
+      - name: Upload signed .ipa
         uses: actions/upload-artifact@v4
-        with:
-          name: TelegramLite-unsigned-ipa
-          path: TelegramLite-unsigned.ipa
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Upload signed .ipa (when available)
-        uses: actions/upload-artifact@v4
-        if: ${{ github.event_name == 'workflow_dispatch' && hashFiles('TelegramLite-signed.ipa') != '' }}
         with:
           name: TelegramLite-signed-ipa
           path: TelegramLite-signed.ipa
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 90
