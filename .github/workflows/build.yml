@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
 
 env:
-  TDLIB_TAG: v1.8.0
+  TDLIB_TAG: master
   SCHEME: TelegramLite
   CONFIGURATION: Release
 
@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tdlib-build
-          key: tdlib-${{ env.TDLIB_TAG }}-xcframework-v3
+          key: tdlib-${{ env.TDLIB_TAG }}-xcframework-v4
 
       - name: Show runner info
         if: steps.cache-tdlib.outputs.cache-hit != 'true'
@@ -123,7 +123,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tdlib-build
-          key: tdlib-${{ env.TDLIB_TAG }}-xcframework-v3
+          key: tdlib-${{ env.TDLIB_TAG }}-xcframework-v4
           fail-on-cache-miss: true
 
       - name: Show cache contents
@@ -256,7 +256,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tdlib-build
-          key: tdlib-${{ env.TDLIB_TAG }}-xcframework-v3
+          key: tdlib-${{ env.TDLIB_TAG }}-xcframework-v4
           fail-on-cache-miss: true
 
       - name: Install XcodeGen
