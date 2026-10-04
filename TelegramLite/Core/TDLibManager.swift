@@ -2,12 +2,15 @@
 //  TDLibManager.swift
 //  TelegramLite
 //
-//  Bridges to TDLib (Telegram Database Library — official Telegram SDK).
-//  Uses Swiftgram/TDLibFramework SPM package which exposes the C API
-//  via `import TDLibFramework`.
+//  Bridges to TDLib via Swiftgram/TDLibFramework SPM package.
+//  Uses the NEW TDLib C API (Int32 client ids) — NOT the old
+//  td_json_client_* API (which expected void* pointers).
 //
-//  We call td_json_client_* C functions directly — no dlopen+dlsym
-//  hackery. The linker pulls symbols from the linked binaryTarget.
+//  Key functions exposed by Swiftgram's binaryTarget:
+//    td_create_client_id() -> Int32
+//    td_send(Int32, String)
+//    td_receive(Double) -> String?
+//    td_execute(String) -> String?
 //
 
 import Foundation
@@ -29,19 +32,16 @@ final class TDLibManager {
 
     static let shared = TDLibManager()
 
-    // Set this to true to bypass TDLib and feed UI with mock data —
-    // useful when running on simulator without a linked TDLib binary.
+    // Set this to true to bypass TDLib and feed UI with mock data.
     static var useMockData: Bool {
         return ProcessInfo.processInfo.environment["USE_MOCK_TD"] == "1"
     }
 
     // MARK: - Telegram API credentials
     //
-    // Get these from https://my.telegram.org → API development tools
-    // (free, takes 1 minute). At build time, the GitHub Actions
-    // workflow reads TG_API_ID / TG_API_HASH from GitHub Secrets and
-    // rewrites the lines below to hardcode the real values.
-    // (ProcessInfo.environment doesn't exist on iOS devices.)
+    // At build time, the GitHub Actions workflow reads TG_API_ID /
+    // TG_API_HASH from GitHub Secrets and rewrites the lines below to
+    // hardcode the real values (env vars don't exist on iOS devices).
     static let api_id: Int = {
         if let env = ProcessInfo.processInfo.environment["TG_API_ID"],
            let id = Int(env) { return id }
@@ -51,14 +51,11 @@ final class TDLibManager {
         ProcessInfo.processInfo.environment["TG_API_HASH"] ?? "" // <-- put your api_hash here
     }()
 
-    /// True if credentials are present. Used to show a clear error to
-    /// the user instead of letting the spinner spin forever.
     static var hasCredentials: Bool {
         return api_id > 0 && !api_hash.isEmpty
     }
 
-    /// In-memory log buffer — surfaced in Settings → Debug log so the
-    /// user can see what TDLib is doing without needing a Mac console.
+    // MARK: - In-memory log buffer (viewable in Settings → Debug log)
     private(set) static var logLines: [String] = []
     private static let logLock = NSLock()
     static func log(_ msg: String) {
@@ -75,16 +72,15 @@ final class TDLibManager {
 
     // MARK: - State
 
-    /// Raw TDLib client pointer. `void *` in C → `UnsafeMutableRawPointer` in Swift.
-    private var client: UnsafeMutableRawPointer?
+    /// TDLib client id. Int32, returned by td_create_client_id().
+    /// 0 means "not initialized yet".
+    private var clientId: Int32 = 0
     private var receiveThread: Thread?
 
     private let sendQueue = DispatchQueue(label: "tg.tdlib.send")
     private let lock = NSLock()
 
-    // Listeners: extra-id → handler
     private var extraHandlers: [String: (TDResponse) -> Void] = [:]
-    // Update-type → list of handlers
     private var updateHandlers: [String: [(TDResponse) -> Void]] = [:]
 
     private(set) var authState: TGAuthState = .waitPhoneNumber
@@ -112,26 +108,24 @@ final class TDLibManager {
             TDLibManager.log("ERROR: api_id/api_hash not set. Get them at https://my.telegram.org → API development tools. Add as GitHub Secrets TG_API_ID and TG_API_HASH, then re-trigger the workflow.")
             return
         }
-        // Direct C call — no dlopen. Symbol is in the binary because we
-        // link the TDLibFramework binaryTarget.
-        let rawPtr = td_json_client_create()
-        guard let ptr = rawPtr else {
-            TDLibManager.log("ERROR: td_json_client_create() returned NULL.")
+        // New TDLib API: returns Int32 client id, not void* pointer.
+        clientId = td_create_client_id()
+        guard clientId > 0 else {
+            TDLibManager.log("ERROR: td_create_client_id() returned 0.")
             return
         }
-        client = ptr
-        TDLibManager.log("TDLib client created (raw pointer: \(ptr)).")
+        TDLibManager.log("TDLib client created (id=\(clientId)).")
+
         receiveThread = Thread(target: self, selector: #selector(receiveLoop), object: nil)
         receiveThread?.name = "tg.tdlib.receive"
         receiveThread?.start()
 
-        // Kick off auth param init.
         sendParameters()
         TDLibManager.log("Sent setTdlibParameters (api_id=\(TDLibManager.api_id)).")
     }
 
     func stop() {
-        send(function: "getOption", parameters: ["name": "version"])
+        guard clientId > 0 else { return }
         send(function: "close", parameters: [:])
     }
 
@@ -149,8 +143,7 @@ final class TDLibManager {
 
     // MARK: - Send
 
-    /// Generic send: builds a JSON request with an `@extra` id, registers
-    /// a one-shot handler, and submits to TDLib.
+    /// Generic send with extra id and one-shot completion handler.
     func request(extraPrefix: String = "req",
                 function: String,
                 parameters: [String: Any],
@@ -167,7 +160,7 @@ final class TDLibManager {
         send(payload: payload)
     }
 
-    /// Fire-and-forget send — no completion handler.
+    /// Fire-and-forget send.
     func send(function: String, parameters: [String: Any]) {
         var payload: [String: Any] = ["@type": function]
         for (k, v) in parameters { payload[k] = v }
@@ -175,29 +168,29 @@ final class TDLibManager {
     }
 
     private func send(payload: [String: Any]) {
-        guard let client = client else {
-            TDLibManager.log("send() skipped — client is nil (TDLib not started). Payload @type=\(payload["@type"] ?? "?")")
+        guard clientId > 0 else {
+            TDLibManager.log("send() skipped — clientId is 0 (TDLib not started). Payload @type=\(payload["@type"] ?? "?")")
             return
         }
         sendQueue.async { [weak self] in
             guard let self = self,
                   let data = try? JSONSerialization.data(withJSONObject: payload),
                   let str = String(data: data, encoding: .utf8) else { return }
+            // New TDLib API: td_send(Int32, String)
             str.withCString { cstr in
-                // void td_json_client_send(void *client, const char *request)
-                td_json_client_send(client, cstr)
+                td_send(self.clientId, cstr)
             }
+            TDLibManager.log("→ sent @type=\(payload["@type"] ?? "?")")
         }
     }
 
     // MARK: - Receive loop (background thread)
 
     @objc private func receiveLoop() {
-        guard let client = client else { return }
         while true {
-            // const char *td_json_client_receive(void *client, double timeout)
-            // Returns NULL on timeout — keep looping.
-            if let rawPtr = td_json_client_receive(client, 1.0) {
+            // New TDLib API: td_receive(Double) -> UnsafeMutablePointer<CChar>?
+            // Blocks for up to `timeout` seconds waiting for a message.
+            if let rawPtr = td_receive(1.0) {
                 let str = String(cString: rawPtr)
                 handle(raw: str)
             }
@@ -218,7 +211,9 @@ final class TDLibManager {
         if let err = resp.raw["error"] as? [String: Any] {
             let code = err["code"] ?? "?"
             let msg = err["message"] ?? "?"
-            TDLibManager.log("TDLib error \(code): \(msg)")
+            TDLibManager.log("← TDLib error \(code): \(msg)")
+        } else {
+            TDLibManager.log("← received @type=\(resp.type ?? "?")")
         }
 
         // Auth state updates are critical — handle them here centrally.
