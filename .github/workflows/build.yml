@@ -1,17 +1,14 @@
-# TelegramLite — CI build with TDLib compiled from source
+# TelegramLite — CI build with Swiftgram prebuilt TDLib
 #
 # Strategy:
-#   - Two jobs:
-#     1. build-tdlib: clones tdlib/td at v1.8.0, builds it for iOS device
-#        (arm64) AND iOS simulator (arm64 + x86_64), combines into a
-#        proper xcframework. Result cached for 90 days.
-#     2. build-app: pulls cached xcframework, drops it into
-#        TelegramLite/Frameworks/, links it into the project, produces
-#        a real-working .ipa (no mock mode — login will actually talk
-#        to Telegram servers).
+#   - Uses Swiftgram/TDLibFramework SPM package — prebuilt xcframework
+#     for iOS (device + simulator), checksummed. Updated regularly by
+#     Swiftgram team. No TDLib compilation needed.
+#   - Workflow patches project.yml at build time to add SPM dep.
+#   - Single job: clone repo → patch → xcodegen → xcodebuild → ipa.
 #
-# First run takes ~30 minutes (compiling TDLib). Subsequent runs ~3
-# minutes (cache hit).
+# Total build time: ~3-5 minutes (download xcframework once, cached by
+# SPM in DerivedData/SourcePackages).
 
 name: Build TelegramLite .ipa
 
@@ -23,124 +20,26 @@ on:
   workflow_dispatch:
 
 env:
-  TDLIB_TAG: master
   SCHEME: TelegramLite
   CONFIGURATION: Release
 
 jobs:
-  build-tdlib:
-    name: Build TDLib from source (cached)
+  build:
+    name: Build .ipa
     runs-on: macos-15
-    outputs:
-      cache-hit: ${{ steps.cache-tdlib.outputs.cache-hit }}
     steps:
-      - name: Cache TDLib xcframework
-        id: cache-tdlib
-        uses: actions/cache@v4
-        with:
-          path: tdlib-build
-          key: tdlib-${{ env.TDLIB_TAG }}-xcframework-v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Show runner info
-        if: steps.cache-tdlib.outputs.cache-hit != 'true'
         run: |
           sw_vers
           xcodebuild -version
-          which cmake gperf
-          brew --prefix openssl@3 || brew --prefix openssl
-
-      - name: Install build deps
-        if: steps.cache-tdlib.outputs.cache-hit != 'true'
-        run: |
-          brew install cmake gperf openssl@3
-
-      - name: Checkout TDLib source
-        if: steps.cache-tdlib.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: tdlib/td
-          ref: ${{ env.TDLIB_TAG }}
-          path: td-src
-
-      - name: Build TDLib for iOS device (arm64)
-        if: steps.cache-tdlib.outputs.cache-hit != 'true'
-        run: |
-          set -ex
-          mkdir -p td-src/build-device
-          cd td-src/build-device
-          OPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
-          cmake \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_ARCHITECTURES="arm64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET="13.0" \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/tdlib-build/device" \
-            ..
-          cmake --build . --target install -j4
-
-      - name: Build TDLib for iOS Simulator (arm64 + x86_64)
-        if: steps.cache-tdlib.outputs.cache-hit != 'true'
-        run: |
-          set -ex
-          mkdir -p td-src/build-sim
-          cd td-src/build-sim
-          OPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
-          cmake \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET="13.0" \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/tdlib-build/sim" \
-            ..
-          cmake --build . --target install -j4
-
-      - name: Combine into xcframework
-        if: steps.cache-tdlib.outputs.cache-hit != 'true'
-        run: |
-          set -ex
-          ls -la tdlib-build/device/lib/ tdlib-build/sim/lib/
-          xcodebuild -create-xcframework \
-            -library tdlib-build/device/lib/libtdjson.a \
-            -headers tdlib-build/device/include \
-            -library tdlib-build/sim/lib/libtdjson.a \
-            -headers tdlib-build/sim/include \
-            -output tdlib-build/libtdjson.xcframework
-          # Remove the per-arch build dirs to keep cache small
-          rm -rf tdlib-build/device tdlib-build/sim
-          du -sh tdlib-build
-
-  build-app:
-    name: Build TelegramLite .ipa with TDLib
-    runs-on: macos-15
-    needs: build-tdlib
-    steps:
-      - name: Checkout TelegramLite
-        uses: actions/checkout@v4
-
-      - name: Restore TDLib xcframework from cache
-        uses: actions/cache@v4
-        with:
-          path: tdlib-build
-          key: tdlib-${{ env.TDLIB_TAG }}-xcframework-v4
-          fail-on-cache-miss: true
-
-      - name: Show cache contents
-        run: |
-          ls -la tdlib-build/
-          ls -la tdlib-build/libtdjson.xcframework/
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Drop TDLib framework into project
-        run: |
-          mkdir -p TelegramLite/Frameworks
-          cp -R tdlib-build/libtdjson.xcframework TelegramLite/Frameworks/
-          ls -la TelegramLite/Frameworks/libtdjson.xcframework/
-
-      - name: Patch project.yml to link TDLib framework
+      - name: Patch project.yml — add Swiftgram TDLib SPM dep
         run: |
           python3 - <<'PY'
           with open('project.yml') as f:
@@ -154,30 +53,38 @@ jobs:
           )
           new = (
               'dependencies:\n'
-              '  - framework: TelegramLite/Frameworks/libtdjson.xcframework\n'
-              '    embed: true\n'
-              '    codeSignOnCopy: true\n'
+              '  - package: TDLibFramework\n'
           )
           if old in content:
               content = content.replace(old, new)
-              with open('project.yml', 'w') as f:
+          elif 'package: TDLibFramework' not in content:
+              content += '\n' + new
+          packages_block = (
+              '\npackages:\n'
+              '  TDLibFramework:\n'
+              '    url: https://github.com/Swiftgram/TDLibFramework.git\n'
+              '    branch: master\n'
+          )
+          if 'packages:' not in content:
+              content += packages_block
+          with open('project.yml', 'w') as f:
                   f.write(content)
-              print('Patched project.yml — TDLib framework linked.')
-          else:
-              # Already patched (e.g. local dev pre-patched) — leave alone.
-              print('project.yml already has dependencies block or pattern not found.')
-              # Try alternate: if 'dependencies:' line is present and starts with whitespace-anchored comment, force-enable
-              if 'framework: TelegramLite/Frameworks/libtdjson.xcframework' not in content:
-                  content += '\n' + new
-                  with open('project.yml', 'w') as f:
-                      f.write(content)
-                  print('Appended dependencies block to project.yml.')
+          print('Patched project.yml — Swiftgram TDLib SPM dep added.')
           PY
+          echo "--- patched project.yml ---"
+          cat project.yml
 
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build .app (linked against TDLib)
+      - name: Resolve SPM deps (downloads Swiftgram xcframework, checksummed)
+        run: |
+          xcodebuild -project TelegramLite.xcodeproj \
+                     -scheme "$SCHEME" \
+                     -configuration "$CONFIGURATION" \
+                     -resolvePackageDependencies
+
+      - name: Build .app (linked against Swiftgram TDLib)
         run: |
           set -eo pipefail
           mkdir -p build
@@ -235,7 +142,7 @@ jobs:
   sign:
     name: Sign .ipa (optional, manual trigger only)
     runs-on: macos-15
-    needs: build-app
+    needs: build
     if: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout
@@ -252,20 +159,8 @@ jobs:
             exit 1
           fi
 
-      - name: Restore TDLib from cache
-        uses: actions/cache@v4
-        with:
-          path: tdlib-build
-          key: tdlib-${{ env.TDLIB_TAG }}-xcframework-v4
-          fail-on-cache-miss: true
-
       - name: Install XcodeGen
         run: brew install xcodegen
-
-      - name: Drop TDLib framework into project
-        run: |
-          mkdir -p TelegramLite/Frameworks
-          cp -R tdlib-build/libtdjson.xcframework TelegramLite/Frameworks/
 
       - name: Patch project.yml
         run: |
@@ -281,17 +176,21 @@ jobs:
           )
           new = (
               'dependencies:\n'
-              '  - framework: TelegramLite/Frameworks/libtdjson.xcframework\n'
-              '    embed: true\n'
-              '    codeSignOnCopy: true\n'
+              '  - package: TDLibFramework\n'
           )
           if old in content:
               content = content.replace(old, new)
-              with open('project.yml', 'w') as f:
-                  f.write(content)
-          elif 'framework: TelegramLite/Frameworks/libtdjson.xcframework' not in content:
+          elif 'package: TDLibFramework' not in content:
               content += '\n' + new
-              with open('project.yml', 'w') as f:
+          packages_block = (
+              '\npackages:\n'
+              '  TDLibFramework:\n'
+              '    url: https://github.com/Swiftgram/TDLibFramework.git\n'
+              '    branch: master\n'
+          )
+          if 'packages:' not in content:
+              content += packages_block
+          with open('project.yml', 'w') as f:
                   f.write(content)
           PY
 
