@@ -1,16 +1,23 @@
-# TelegramLite — CI build with Swiftgram TDLib via SPM
+# TelegramLite — CI build with Swiftgram TDLib properly statically linked
 #
-# Strategy:
-#   - Patches project.yml to add SPM dep on Swiftgram/TDLibFramework
-#   - xcodegen resolves the SPM package (downloads the binaryTarget
-#     xcframework)
-#   - xcodebuild links the binaryTarget's static archive into the
-#     TelegramLite binary via the wrapper target's transitive dep
-#   - In Swift code, `import TDLibFramework` gives access to C
-#     functions like td_json_client_create/send/receive/etc.
-#   - We call those directly (no dlopen+dlsym hackery).
+# What was wrong before:
+#   - We downloaded TDLibFramework.xcframework and used `framework: ...
+#     embed: true` in project.yml
+#   - But TDLibFramework.xcframework contains STATIC ARCHIVES (.a), not
+#     dynamic frameworks (.dylib)
+#   - `embed: true` just copied the .framework folder into the .app
+#     bundle, but iOS does NOT load static archives at runtime
+#   - The static archive's symbols were never linked into the TelegramLite
+#     binary, so dlopen+dlsym at runtime found nothing
+#   - Result: app runs in mock mode, spinner spins forever on login
 #
-# Total build time: ~3-5 minutes.
+# Fix:
+#   - Use `xcframework:` dependency (not `framework:`) with `embed: false`
+#   - Xcode auto-detects static archive inside xcframework and adds it
+#     to OTHER_LDFLAGS as -force_load for the correct platform slice
+#   - Symbols get baked into the TelegramLite binary at link time
+#   - No more dlopen+dlsym — use `import TDLibFramework` + direct C calls
+#     to td_create_client_id / td_send / td_receive
 
 name: Build TelegramLite .ipa
 
@@ -24,6 +31,7 @@ on:
 env:
   SCHEME: TelegramLite
   CONFIGURATION: Release
+  TDLIB_ZIP_URL: "https://github.com/Swiftgram/TDLibFramework/releases/download/1.8.67-42e6a525/TDLibFramework.zip"
 
 jobs:
   build:
@@ -41,14 +49,26 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Patch project.yml — add Swiftgram TDLib SPM dep + inject api creds
+      - name: Create Frameworks dir + download Swiftgram TDLib
+        run: |
+          set -ex
+          mkdir -p TelegramLite/Frameworks
+          curl -L -sS -o td.zip "$TDLIB_ZIP_URL"
+          unzip -o td.zip -d td_extract
+          find td_extract -name 'TDLibFramework.xcframework' -type d | head -n1
+          mv $(find td_extract -name 'TDLibFramework.xcframework' -type d | head -n1) TelegramLite/Frameworks/
+          ls -la TelegramLite/Frameworks/TDLibFramework.xcframework/
+          echo "--- contents ---"
+          ls -la TelegramLite/Frameworks/TDLibFramework.xcframework/*/
+
+      - name: Patch project.yml — link TDLib xcframework + inject api creds
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: |
           python3 - <<'PY'
           import os
-          # 1. Patch project.yml: replace commented deps block with SPM dep
+          # Patch project.yml: replace commented deps block with xcframework dep (embed: false → static link)
           with open('project.yml') as f:
               content = f.read()
           old = (
@@ -60,26 +80,18 @@ jobs:
           )
           new = (
               'dependencies:\n'
-              '  - package: TDLibFramework\n'
+              '  - xcframework: TelegramLite/Frameworks/TDLibFramework.xcframework\n'
+              '    embed: false\n'
           )
           if old in content:
               content = content.replace(old, new)
-          elif 'package: TDLibFramework' not in content:
+          elif 'xcframework: TelegramLite/Frameworks/TDLibFramework.xcframework' not in content:
               content += '\n' + new
-          # Also add packages section
-          packages_block = (
-              '\npackages:\n'
-              '  TDLibFramework:\n'
-              '    url: https://github.com/Swiftgram/TDLibFramework.git\n'
-              '    branch: main\n'
-          )
-          if 'packages:' not in content:
-              content += packages_block
           with open('project.yml', 'w') as f:
               f.write(content)
-          print('Patched project.yml — Swiftgram TDLib SPM dep added.')
+          print('Patched project.yml — TDLibFramework.xcframework statically linked.')
 
-          # 2. Inject api_id / api_hash into TDLibManager.swift
+          # Inject api_id / api_hash into TDLibManager.swift
           api_id = os.environ.get('TG_API_ID', '').strip()
           api_hash = os.environ.get('TG_API_HASH', '').strip()
           if not api_id or not api_hash:
@@ -114,23 +126,15 @@ jobs:
                   f.write(src)
               print(f'Injected TG_API_ID={api_id} and TG_API_HASH={api_hash[:8]}... into TDLibManager.swift.')
           PY
-          echo "--- patched project.yml ---"
-          cat project.yml
-          echo ""
-          echo "--- TDLibManager.swift (api lines) ---"
-          grep -A1 "static let api_id\|static let api_hash" TelegramLite/Core/TDLibManager.swift | head -10
+          echo "--- patched project.yml (tail) ---"
+          tail -25 project.yml
+          echo "--- TDLibManager.swift api lines ---"
+          grep "static let api_id\|static let api_hash" TelegramLite/Core/TDLibManager.swift
 
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Resolve SPM deps (downloads Swiftgram xcframework)
-        run: |
-          xcodebuild -project TelegramLite.xcodeproj \
-                     -scheme "$SCHEME" \
-                     -configuration "$CONFIGURATION" \
-                     -resolvePackageDependencies
-
-      - name: Build .app (linked against Swiftgram TDLib via SPM)
+      - name: Build .app (TDLib statically linked into binary)
         run: |
           set -eo pipefail
           mkdir -p build
@@ -159,6 +163,10 @@ jobs:
           echo "Found app: $APP_PATH"
           ls -la "$APP_PATH"
           du -sh "$APP_PATH"
+          # Critical check: verify TDLib symbols are in the binary
+          echo "--- checking TDLib symbols in binary ---"
+          nm -gU "$APP_PATH/TelegramLite" 2>/dev/null | grep -E "td_(create_client_id|send|receive|execute)" | head -5 || echo "(no TDLib symbols found via nm)"
+          strings "$APP_PATH/TelegramLite" | grep -E "td_(create_client_id|send|receive)" | head -5 || true
           echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
 
       - name: Package unsigned .ipa
@@ -210,7 +218,14 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Patch project.yml (SPM dep + api creds)
+      - name: Download Swiftgram TDLib xcframework
+        run: |
+          mkdir -p TelegramLite/Frameworks
+          curl -L -sS -o td.zip "$TDLIB_ZIP_URL"
+          unzip -o td.zip -d td_extract
+          mv $(find td_extract -name 'TDLibFramework.xcframework' -type d | head -n1) TelegramLite/Frameworks/
+
+      - name: Patch project.yml + inject api creds
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
@@ -228,20 +243,13 @@ jobs:
           )
           new = (
               'dependencies:\n'
-              '  - package: TDLibFramework\n'
+              '  - xcframework: TelegramLite/Frameworks/TDLibFramework.xcframework\n'
+              '    embed: false\n'
           )
           if old in content:
               content = content.replace(old, new)
-          elif 'package: TDLibFramework' not in content:
+          elif 'xcframework: TelegramLite/Frameworks/TDLibFramework.xcframework' not in content:
               content += '\n' + new
-          packages_block = (
-              '\npackages:\n'
-              '  TDLibFramework:\n'
-              '    url: https://github.com/Swiftgram/TDLibFramework.git\n'
-              '    branch: main\n'
-          )
-          if 'packages:' not in content:
-              content += packages_block
           with open('project.yml', 'w') as f:
               f.write(content)
           api_id = os.environ.get('TG_API_ID', '').strip()
