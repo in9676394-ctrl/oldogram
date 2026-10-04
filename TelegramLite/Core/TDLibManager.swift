@@ -18,6 +18,7 @@
 //
 
 import Foundation
+import UIKit
 
 // MARK: - TDLib JSON bridge
 
@@ -320,7 +321,7 @@ final class TDLibManager {
                                  receive: td_receive,
                                  send:    td_send,
                                  execute: td_execute,
-                                 destroy: td_destroy)?? {
+                                 destroy: td_destroy)? {
         if let l = cachedLib { return l }
 
         // Try the bundled path first (when linked into the binary).
