@@ -33,8 +33,8 @@ final class MessageCell: UITableViewCell {
 
     private var currentPlayer: AVAudioPlayer?
 
-    override init(style: UITableViewCell.CellStyle, accessoryType: UITableViewCell.AccessoryType) {
-        super.init(style: .default, reuseIdentifier: MessageCell.reuseId)
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: MessageCell.reuseId)
         setup()
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -235,10 +235,8 @@ final class MessageCell: UITableViewCell {
             requestFile(fileId: fileId) { path in
                 if let p = path {
                     DispatchQueue.main.async {
-                        self.voiceButton.tag = 0
-                        let url = URL(fileURLWithPath: p)
                         self.voiceButton.removeTarget(self, action: nil, for: .allEvents)
-                        self.voiceButton.addTarget(self, action: #selector(self.playVoice(url:)),
+                        self.voiceButton.addTarget(self, action: #selector(self.playVoiceTapped),
                                                    for: .touchUpInside)
                         self.voiceButton.accessibilityHint = p
                     }
@@ -255,9 +253,10 @@ final class MessageCell: UITableViewCell {
         }
     }
 
-    @objc private func playVoice(url: URL) {
+    @objc private func playVoiceTapped() {
+        guard let path = voiceButton.accessibilityHint, !path.isEmpty else { return }
         do {
-            currentPlayer = try AVAudioPlayer(contentsOf: url)
+            currentPlayer = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
             currentPlayer?.play()
         } catch {
             // ignore

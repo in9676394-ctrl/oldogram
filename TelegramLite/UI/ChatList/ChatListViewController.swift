@@ -280,8 +280,8 @@ final class ChatListCell: UITableViewCell {
     private let muteIcon = UIImageView()
     private let draftLabel = UILabel()
 
-    override init(style: UITableViewCell.CellStyle, accessoryType: UITableViewCell.AccessoryType) {
-        super.init(style: .default, reuseIdentifier: ChatListCell.reuseId)
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: ChatListCell.reuseId)
         setup()
     }
 

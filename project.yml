@@ -18,7 +18,7 @@ name: TelegramLite
 options:
   bundleIdPrefix: app.lite
   deploymentTarget:
-    iOS: "12.0"
+    iOS: "13.0"
   createIntermediateGroups: true
   defaultConfig: Debug
 
@@ -26,7 +26,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     TARGETED_DEVICE_FAMILY: "1,2"
-    IPHONEOS_DEPLOYMENT_TARGET: "12.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "13.0"
     ENABLE_BITCODE: NO
     DEVELOPMENT_LANGUAGE: en
     CLANG_ENABLE_MODULES: YES
@@ -40,7 +40,7 @@ targets:
   TelegramLite:
     type: application
     platform: iOS
-    deploymentTarget: "12.0"
+    deploymentTarget: "13.0"
     sources:
       - path: TelegramLite
         excludes:
@@ -63,7 +63,7 @@ targets:
         SWIFT_OBJC_INTERFACE_HEADER_NAME: ""
         ENABLE_BITCODE: NO
         SWIFT_OPTIMIZATION_LEVEL: "-Osize"
-        IPHONEOS_DEPLOYMENT_TARGET: "12.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "13.0"
         GCC_WARN_ABOUT_RETURN_TYPE: YES_ERROR
         SWIFT_DISABLE_SAFETY_CHECKS: NO
         # Tell the linker to look for libtdjson in the Frameworks folder.

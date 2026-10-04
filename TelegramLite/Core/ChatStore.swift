@@ -156,8 +156,9 @@ final class ChatStore {
         guard let chatId = resp.raw["chat_id"] as? Int64 else { return }
         let draftText: String?
         if let draft = resp.raw["draft_message"] as? [String: Any],
-           let input = draft["input_message_text"] as? [String: Any] {
-            draftText = input["text"] as? [String: Any]
+           let input = draft["input_message_text"] as? [String: Any],
+           let text = input["text"] as? [String: Any] {
+            draftText = text["text"] as? String
         } else {
             draftText = nil
         }

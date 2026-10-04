@@ -137,7 +137,8 @@ final class ChatViewController: UIViewController {
         }
         TDLibManager.shared.request(function: "getChat",
                                    parameters: ["chat_id": chatId]) { resp in
-            if let c = resp.raw as? [String: Any] {
+            let c = resp.raw
+            if c["@type"] as? String == "chat" {
                 let title = c["title"] as? String ?? "Chat"
                 DispatchQueue.main.async {
                     self.chat = TGChat(id: self.chatId, title: title, type: .private_,
