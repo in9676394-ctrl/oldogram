@@ -94,6 +94,27 @@ final class SettingsViewController: UITableViewController {
             Row(title: "Profile Photo", detail: nil, icon: "photo.fill", iconColor: Theme.accent, action: { }),
         ]))
 
+        sections.append(Section(header: "Debug", rows: [
+            Row(title: "API Credentials",
+                detail: TDLibManager.hasCredentials ? "Set ✓" : "MISSING",
+                icon: "key.fill",
+                iconColor: TDLibManager.hasCredentials ? Theme.online : Theme.destructive,
+                action: {
+                    let alert = UIAlertController(title: "API credentials",
+                                                  message: TDLibManager.hasCredentials
+                                                    ? "api_id = \(TDLibManager.api_id)\napi_hash = \(TDLibManager.api_hash.prefix(8))...\n\nThese are baked into the binary at build time. To change them, update GitHub Secrets TG_API_ID and TG_API_HASH, then re-trigger the workflow."
+                                                    : "MISSING. Get them at https://my.telegram.org → API development tools, add as GitHub Secrets TG_API_ID and TG_API_HASH, re-trigger the workflow.",
+                                                  preferredStyle: .alert)
+                    alert.addAction(UIAlertAction(title: "OK", style: .default))
+                    self.present(alert, animated: true)
+                }),
+            Row(title: "Debug Log",
+                detail: "\(TDLibManager.logLines.count) lines",
+                icon: "doc.text.fill",
+                iconColor: Theme.accent,
+                action: { self.showDebugLog() }),
+        ]))
+
         sections.append(Section(header: "Data", rows: [
             Row(title: "Storage Usage", detail: nil, icon: "internaldrive", iconColor: Theme.accent, action: { }),
             Row(title: "Auto-Download Media", detail: "On", icon: "arrow.down.circle.fill", iconColor: Theme.accent, action: { }),
@@ -152,6 +173,19 @@ final class SettingsViewController: UITableViewController {
         ])
         avatar.set(title: "Me", color: Theme.accent, url: nil)
         return header
+    }
+
+    // MARK: - Debug log
+
+    private func showDebugLog() {
+        let nav = UINavigationController(rootViewController: DebugLogViewController())
+        nav.navigationBar.barTintColor = Theme.navbar
+        nav.navigationBar.tintColor = Theme.accent
+        nav.navigationBar.titleTextAttributes = [
+            .foregroundColor: Theme.text,
+            .font: Theme.semiboldFont(17)
+        ]
+        present(nav, animated: true)
     }
 
     // MARK: - Table data

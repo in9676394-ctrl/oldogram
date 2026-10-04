@@ -192,11 +192,24 @@ final class AuthViewController: UIViewController, UITextFieldDelegate {
     }
 
     @objc private func primaryTapped() {
+        // Pre-flight check: if no credentials, show error immediately
+        if !TDLibManager.hasCredentials {
+            errorLabel.text = "TG_API_ID / TG_API_HASH not set. Get them at my.telegram.org → API development tools, add as GitHub Secrets, re-build."
+            return
+        }
         setLoading(true)
         switch stage {
         case .phone:
             currentPhoneNumber = textField.text ?? ""
+            // Start a 30-second timeout — if TDLib doesn't reply, show error.
+            let timeoutWork = DispatchWorkItem { [weak self] in
+                guard let self = self, self.activityIndicator.isAnimating else { return }
+                self.setLoading(false)
+                self.errorLabel.text = "Timed out. Check Settings → Debug log for details. Likely TDLib couldn't reach Telegram servers."
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeoutWork)
             AuthManager.shared.sendPhoneNumber(currentPhoneNumber) { result in
+                timeoutWork.cancel()
                 self.setLoading(false)
                 switch result {
                 case .success:
@@ -208,7 +221,7 @@ final class AuthViewController: UIViewController, UITextFieldDelegate {
                         case .waitPassword(let hint, _):
                             self.stage = .password(hint: hint)
                         default:
-                            self.errorLabel.text = "Unexpected state. Try again."
+                            self.errorLabel.text = "Unexpected state. Check Settings → Debug log."
                         }
                         self.applyStage()
                     }
@@ -258,10 +271,34 @@ final class AuthViewController: UIViewController, UITextFieldDelegate {
     }
 
     private func waitForAuthStateChange(_ completion: @escaping (TDLibManager.TGAuthState) -> Void) {
+        // Poll auth state every 0.5s for up to 25s. The completion fires
+        // as soon as the state changes from .waitPhoneNumber (or whatever
+        // the initial state was) to something else.
         DispatchQueue.global().async {
-            Thread.sleep(forTimeInterval: 0.5)
-            let s = TDLibManager.shared.authState
-            DispatchQueue.main.async { completion(s) }
+            let initialState = TDLibManager.shared.authState
+            var waited: TimeInterval = 0
+            let interval: TimeInterval = 0.5
+            while waited < 25 {
+                Thread.sleep(forTimeInterval: interval)
+                waited += interval
+                let s = TDLibManager.shared.authState
+                // Stop when state has changed from initial.
+                switch (initialState, s) {
+                case (.waitPhoneNumber, .waitCode), (.waitPhoneNumber, .waitPassword),
+                     (.waitPhoneNumber, .waitRegistration), (.waitPhoneNumber, .waitOtherDeviceConfirmation),
+                     (.waitPhoneNumber, .authorizationReady), (.waitPhoneNumber, .closed),
+                     (.waitCode, .waitPassword), (.waitCode, .waitRegistration),
+                     (.waitCode, .authorizationReady), (.waitCode, .closed),
+                     (.waitPassword, .authorizationReady), (.waitPassword, .closed),
+                     (.waitRegistration, .authorizationReady), (.waitRegistration, .closed):
+                    DispatchQueue.main.async { completion(s) }
+                    return
+                default:
+                    continue
+                }
+            }
+            // Timeout — pass current state, caller decides what to do.
+            DispatchQueue.main.async { completion(TDLibManager.shared.authState) }
         }
     }
 

@@ -67,6 +67,28 @@ final class TDLibManager {
         ProcessInfo.processInfo.environment["TG_API_HASH"] ?? "" // <-- put your api_hash here
     }()
 
+    /// True if credentials are missing. Used to show a clear error to the
+    /// user instead of letting the spinner spin forever.
+    static var hasCredentials: Bool {
+        return api_id > 0 && !api_hash.isEmpty
+    }
+
+    /// In-memory log buffer — surfaced in Settings → Debug log so the user
+    /// can see what TDLib is doing without needing a Mac console.
+    private(set) static var logLines: [String] = []
+    private static let logLock = NSLock()
+    static func log(_ msg: String) {
+        let stamp = DateFormatter.localizedString(from: Date(),
+                                                   dateStyle: .none,
+                                                   timeStyle: .medium)
+        let line = "[\(stamp)] \(msg)"
+        logLock.lock()
+        logLines.append(line)
+        if logLines.count > 500 { logLines.removeFirst(logLines.count - 500) }
+        logLock.unlock()
+        print(line)
+    }
+
     // MARK: - State
 
     private var client: TDLibClientRef?
@@ -98,21 +120,26 @@ final class TDLibManager {
 
     func start() {
         guard !TDLibManager.useMockData else {
-            print("[TDLib] Mock mode — skipping real init")
+            TDLibManager.log("Mock mode — skipping real init")
+            return
+        }
+        guard TDLibManager.hasCredentials else {
+            TDLibManager.log("ERROR: api_id/api_hash not set. Get them at https://my.telegram.org → API development tools. Add as GitHub Secrets TG_API_ID and TG_API_HASH, then re-trigger the workflow.")
             return
         }
         guard let lib = loadTDLib() else {
-            print("[TDLib] Could not load libtdjson — running in mock mode.")
-            print("[TDLib] See README.md → Integration to add the framework.")
+            TDLibManager.log("ERROR: Could not load libtdjson. TDLibFramework is not linked.")
             return
         }
         self.client = lib.create()
+        TDLibManager.log("TDLib client created.")
         self.receiveThread = Thread(target: self, selector: #selector(receiveLoop), object: nil)
         self.receiveThread?.name = "tg.tdlib.receive"
         self.receiveThread?.start()
 
         // Kick off auth param init.
         sendParameters()
+        TDLibManager.log("Sent setTdlibParameters (api_id=\(TDLibManager.api_id)).")
     }
 
     func stop() {
@@ -163,6 +190,7 @@ final class TDLibManager {
 
     private func send(payload: [String: Any]) {
         guard !TDLibManager.useMockData, let client = client else {
+            TDLibManager.log("send() skipped — client is nil (TDLib not started). Payload @type=\(payload["@type"] ?? "?")")
             return
         }
         sendQueue.async { [weak self] in
@@ -196,13 +224,24 @@ final class TDLibManager {
 
     private func handle(raw: String) {
         guard let data = raw.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            TDLibManager.log("Could not parse TDLib response as JSON: \(raw.prefix(200))")
+            return
+        }
         let resp = TDResponse(raw: obj)
+
+        // Log errors from TDLib
+        if let err = resp.raw["error"] as? [String: Any] {
+            let code = err["code"] ?? "?"
+            let msg = err["message"] ?? "?"
+            TDLibManager.log("TDLib error \(code): \(msg)")
+        }
 
         // Auth state updates are critical — handle them here centrally.
         if resp.type == "updateAuthorizationState",
            let state = resp["authorization_state"] as? [String: Any],
            let stateType = state["@type"] as? String {
+            TDLibManager.log("Auth state → \(stateType)")
             handleAuthState(stateType, state)
             emit("updateAuthorizationState", resp)
             return
