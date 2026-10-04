@@ -19,6 +19,7 @@
 
 import Foundation
 import UIKit
+import TDLibFramework
 
 // MARK: - TDLib JSON bridge
 

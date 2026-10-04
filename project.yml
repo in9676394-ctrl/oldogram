@@ -74,6 +74,12 @@ targets:
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
+        # Force-load the static archive so all symbols end up in the binary,
+        # even those not directly referenced (we look them up via dlsym).
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-ObjC"
+          - "-all_load"
 
     # Uncomment after dropping libtdjson.xcframework into TelegramLite/Frameworks/
     # dependencies:
