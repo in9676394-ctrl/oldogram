@@ -77,11 +77,14 @@ targets:
           - "@executable_path/Frameworks"
         # Force-load the static archive from SPM so all TDLib symbols
         # end up in the binary, even those not directly referenced by
-        # Swift code (we look them up via dlsym at runtime as a fallback).
+        # Swift code. -lz links zlib (needed by TDLib's Gzip), -lc++
+        # links the C++ standard library (TDLib is C++).
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-ObjC"
           - "-all_load"
+          - "-lz"
+          - "-lc++"
 
     # Uncomment after dropping libtdjson.xcframework into TelegramLite/Frameworks/
     # dependencies:
