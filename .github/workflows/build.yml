@@ -1,13 +1,16 @@
-# TelegramLite — CI build with Swiftgram prebuilt TDLib (direct xcframework download)
+# TelegramLite — CI build with Swiftgram TDLib via SPM
 #
-# Why direct download instead of SPM:
-#   Swiftgram's Package.swift product 'TDLibFramework' only exposes the
-#   wrapper target, not the binaryTarget module. So 'import TDLibFramework'
-#   in Swift code fails with 'no such module'.
+# Strategy:
+#   - Patches project.yml to add SPM dep on Swiftgram/TDLibFramework
+#   - xcodegen resolves the SPM package (downloads the binaryTarget
+#     xcframework)
+#   - xcodebuild links the binaryTarget's static archive into the
+#     TelegramLite binary via the wrapper target's transitive dep
+#   - In Swift code, `import TDLibFramework` gives access to C
+#     functions like td_json_client_create/send/receive/etc.
+#   - We call those directly (no dlopen+dlsym hackery).
 #
-#   Direct xcframework download + framework: dependency in project.yml
-#   works reliably — the static archive gets linked into the binary,
-#   symbols are findable via dlopen+dlsym at runtime.
+# Total build time: ~3-5 minutes.
 
 name: Build TelegramLite .ipa
 
@@ -21,10 +24,6 @@ on:
 env:
   SCHEME: TelegramLite
   CONFIGURATION: Release
-  # Swiftgram TDLibFramework release tag — bump when they publish a new one.
-  # Find latest at: https://github.com/Swiftgram/TDLibFramework/releases
-  TDLIB_RELEASE_TAG: "1.8.67-42e6a525"
-  TDLIB_ZIP_URL: "https://github.com/Swiftgram/TDLibFramework/releases/download/1.8.67-42e6a525/TDLibFramework.zip"
 
 jobs:
   build:
@@ -42,26 +41,14 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Create Frameworks dir
-        run: mkdir -p TelegramLite/Frameworks
-
-      - name: Download Swiftgram TDLib xcframework
-        run: |
-          set -ex
-          curl -L -sS -o td.zip "$TDLIB_ZIP_URL"
-          unzip -o td.zip -d td_extract
-          find td_extract -name 'TDLibFramework.xcframework' -type d | head -n1
-          mv $(find td_extract -name 'TDLibFramework.xcframework' -type d | head -n1) TelegramLite/Frameworks/
-          ls -la TelegramLite/Frameworks/TDLibFramework.xcframework/
-
-      - name: Patch project.yml — link TDLib framework + force-load
+      - name: Patch project.yml — add Swiftgram TDLib SPM dep + inject api creds
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: |
           python3 - <<'PY'
           import os
-          # Patch project.yml: link TDLibFramework.xcframework
+          # 1. Patch project.yml: replace commented deps block with SPM dep
           with open('project.yml') as f:
               content = f.read()
           old = (
@@ -73,30 +60,34 @@ jobs:
           )
           new = (
               'dependencies:\n'
-              '  - framework: TelegramLite/Frameworks/TDLibFramework.xcframework\n'
-              '    embed: true\n'
-              '    codeSignOnCopy: true\n'
+              '  - package: TDLibFramework\n'
           )
           if old in content:
               content = content.replace(old, new)
-          elif 'framework: TelegramLite/Frameworks/TDLibFramework.xcframework' not in content:
+          elif 'package: TDLibFramework' not in content:
               content += '\n' + new
+          # Also add packages section
+          packages_block = (
+              '\npackages:\n'
+              '  TDLibFramework:\n'
+              '    url: https://github.com/Swiftgram/TDLibFramework.git\n'
+              '    branch: main\n'
+          )
+          if 'packages:' not in content:
+              content += packages_block
           with open('project.yml', 'w') as f:
               f.write(content)
-          print('Patched project.yml — TDLibFramework.xcframework linked.')
+          print('Patched project.yml — Swiftgram TDLib SPM dep added.')
 
-          # Inject api_id / api_hash into TDLibManager.swift
-          # (ProcessInfo.environment doesn't exist on iOS devices — we
-          # have to bake the values into the Swift source at build time.)
+          # 2. Inject api_id / api_hash into TDLibManager.swift
           api_id = os.environ.get('TG_API_ID', '').strip()
           api_hash = os.environ.get('TG_API_HASH', '').strip()
           if not api_id or not api_hash:
-              print('::warning::TG_API_ID / TG_API_HASH secrets not set — app will build but auth will fail.')
+              print('::warning::TG_API_ID / TG_API_HASH secrets not set.')
           else:
               path = 'TelegramLite/Core/TDLibManager.swift'
               with open(path) as f:
                   src = f.read()
-              # Replace the entire static let api_id block.
               old_id = (
                   '    static let api_id: Int = {\n'
                   '        if let env = ProcessInfo.processInfo.environment["TG_API_ID"],\n'
@@ -108,8 +99,7 @@ jobs:
               if old_id in src:
                   src = src.replace(old_id, new_id)
               else:
-                  print('::warning::api_id pattern not found in TDLibManager.swift — manual fix needed.')
-              # Replace the entire static let api_hash block.
+                  print('::warning::api_id pattern not found in TDLibManager.swift.')
               old_hash = (
                   '    static let api_hash: String = {\n'
                   '        ProcessInfo.processInfo.environment["TG_API_HASH"] ?? "" // <-- put your api_hash here\n'
@@ -119,20 +109,28 @@ jobs:
               if old_hash in src:
                   src = src.replace(old_hash, new_hash)
               else:
-                  print('::warning::api_hash pattern not found in TDLibManager.swift — manual fix needed.')
+                  print('::warning::api_hash pattern not found in TDLibManager.swift.')
               with open(path, 'w') as f:
                   f.write(src)
               print(f'Injected TG_API_ID={api_id} and TG_API_HASH={api_hash[:8]}... into TDLibManager.swift.')
           PY
-          echo "--- patched project.yml (tail) ---"
-          tail -20 project.yml
-          echo "--- TDLibManager.swift head ---"
-          head -90 TelegramLite/Core/TDLibManager.swift | tail -25
+          echo "--- patched project.yml ---"
+          cat project.yml
+          echo ""
+          echo "--- TDLibManager.swift (api lines) ---"
+          grep -A1 "static let api_id\|static let api_hash" TelegramLite/Core/TDLibManager.swift | head -10
 
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build .app (linked against Swiftgram TDLib)
+      - name: Resolve SPM deps (downloads Swiftgram xcframework)
+        run: |
+          xcodebuild -project TelegramLite.xcodeproj \
+                     -scheme "$SCHEME" \
+                     -configuration "$CONFIGURATION" \
+                     -resolvePackageDependencies
+
+      - name: Build .app (linked against Swiftgram TDLib via SPM)
         run: |
           set -eo pipefail
           mkdir -p build
@@ -212,14 +210,7 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Download Swiftgram TDLib xcframework
-        run: |
-          mkdir -p TelegramLite/Frameworks
-          curl -L -sS -o td.zip "$TDLIB_ZIP_URL"
-          unzip -o td.zip -d td_extract
-          mv $(find td_extract -name 'TDLibFramework.xcframework' -type d | head -n1) TelegramLite/Frameworks/
-
-      - name: Patch project.yml
+      - name: Patch project.yml (SPM dep + api creds)
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
@@ -237,17 +228,22 @@ jobs:
           )
           new = (
               'dependencies:\n'
-              '  - framework: TelegramLite/Frameworks/TDLibFramework.xcframework\n'
-              '    embed: true\n'
-              '    codeSignOnCopy: true\n'
+              '  - package: TDLibFramework\n'
           )
           if old in content:
               content = content.replace(old, new)
-          elif 'framework: TelegramLite/Frameworks/TDLibFramework.xcframework' not in content:
+          elif 'package: TDLibFramework' not in content:
               content += '\n' + new
+          packages_block = (
+              '\npackages:\n'
+              '  TDLibFramework:\n'
+              '    url: https://github.com/Swiftgram/TDLibFramework.git\n'
+              '    branch: main\n'
+          )
+          if 'packages:' not in content:
+              content += packages_block
           with open('project.yml', 'w') as f:
               f.write(content)
-
           api_id = os.environ.get('TG_API_ID', '').strip()
           api_hash = os.environ.get('TG_API_HASH', '').strip()
           if api_id and api_hash:
@@ -275,8 +271,6 @@ jobs:
               with open(path, 'w') as f:
                   f.write(src)
               print(f'Injected api_id={api_id} api_hash={api_hash[:8]}...')
-          else:
-              print('::warning::TG_API_ID/TG_API_HASH secrets missing.')
           PY
 
       - name: Generate Xcode project

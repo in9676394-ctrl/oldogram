@@ -3,37 +3,19 @@
 //  TelegramLite
 //
 //  Bridges to TDLib (Telegram Database Library — official Telegram SDK).
-//  TDLib runs in JSON-in/JSON-out mode: we send a JSON request, get JSON
-//  responses asynchronously. This file wires that pipe into Swift.
+//  Uses Swiftgram/TDLibFramework SPM package which exposes the C API
+//  via `import TDLibFramework`.
 //
-//  INTEGRATION:
-//  The app expects `TDLib` as a linked binary. Two integration paths are
-//  supported — see README.md:
-//    1. CocoaPods:  pod 'TDLibKit' (community pod, see Podfile)
-//    2. Prebuilt:    drop `libtdjson.xcframework` into Vendor/ and link it.
-//
-//  The wrapper degrades gracefully if TDLib is not linked at runtime:
-//  you'll get logged warnings and a mock data provider for UI smoke testing.
-//  Set `useMockData = true` below to test UI without TDLib.
+//  We call td_json_client_* C functions directly — no dlopen+dlsym
+//  hackery. The linker pulls symbols from the linked binaryTarget.
 //
 
 import Foundation
 import UIKit
+import TDLibFramework
 
-// MARK: - TDLib JSON bridge
+// MARK: - TDLib JSON bridge response
 
-/// Opaque pointer to a TDLib client instance.
-private typealias TDLibClientRef = OpaquePointer
-
-/// Function-pointer signatures matching `td_json_client_create` etc.
-private typealias td_create_client      = @convention(c) () -> TDLibClientRef?
-private typealias td_receive            = @convention(c) (TDLibClientRef?, Double) -> UnsafeMutablePointer<CChar>?
-private typealias td_send              = @convention(c) (TDLibClientRef?, UnsafePointer<CChar>) -> Void
-private typealias td_execute           = @convention(c) (TDLibClientRef?, UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>?
-private typealias td_destroy           = @convention(c) (TDLibClientRef?) -> Void
-
-/// Lightweight TDLib call representation. We do NOT model every field —
-/// only the ones we read in this app.
 struct TDResponse {
     let raw: [String: Any]
 
@@ -53,11 +35,13 @@ final class TDLibManager {
         return ProcessInfo.processInfo.environment["USE_MOCK_TD"] == "1"
     }
 
-    // MARK: - Telegram API credentials (replace with your own)
+    // MARK: - Telegram API credentials
     //
     // Get these from https://my.telegram.org → API development tools
-    // (free, takes 1 minute). Put real values here or override via env
-    // vars so the GitHub workflow can inject them at build time.
+    // (free, takes 1 minute). At build time, the GitHub Actions
+    // workflow reads TG_API_ID / TG_API_HASH from GitHub Secrets and
+    // rewrites the lines below to hardcode the real values.
+    // (ProcessInfo.environment doesn't exist on iOS devices.)
     static let api_id: Int = {
         if let env = ProcessInfo.processInfo.environment["TG_API_ID"],
            let id = Int(env) { return id }
@@ -67,14 +51,14 @@ final class TDLibManager {
         ProcessInfo.processInfo.environment["TG_API_HASH"] ?? "" // <-- put your api_hash here
     }()
 
-    /// True if credentials are missing. Used to show a clear error to the
-    /// user instead of letting the spinner spin forever.
+    /// True if credentials are present. Used to show a clear error to
+    /// the user instead of letting the spinner spin forever.
     static var hasCredentials: Bool {
         return api_id > 0 && !api_hash.isEmpty
     }
 
-    /// In-memory log buffer — surfaced in Settings → Debug log so the user
-    /// can see what TDLib is doing without needing a Mac console.
+    /// In-memory log buffer — surfaced in Settings → Debug log so the
+    /// user can see what TDLib is doing without needing a Mac console.
     private(set) static var logLines: [String] = []
     private static let logLock = NSLock()
     static func log(_ msg: String) {
@@ -91,7 +75,8 @@ final class TDLibManager {
 
     // MARK: - State
 
-    private var client: TDLibClientRef?
+    /// Raw TDLib client pointer. `void *` in C → `UnsafeMutableRawPointer` in Swift.
+    private var client: UnsafeMutableRawPointer?
     private var receiveThread: Thread?
 
     private let sendQueue = DispatchQueue(label: "tg.tdlib.send")
@@ -127,15 +112,18 @@ final class TDLibManager {
             TDLibManager.log("ERROR: api_id/api_hash not set. Get them at https://my.telegram.org → API development tools. Add as GitHub Secrets TG_API_ID and TG_API_HASH, then re-trigger the workflow.")
             return
         }
-        guard let lib = loadTDLib() else {
-            TDLibManager.log("ERROR: Could not load libtdjson. TDLibFramework is not linked.")
+        // Direct C call — no dlopen. Symbol is in the binary because we
+        // link the TDLibFramework binaryTarget.
+        let rawPtr = td_json_client_create()
+        guard let ptr = rawPtr else {
+            TDLibManager.log("ERROR: td_json_client_create() returned NULL.")
             return
         }
-        self.client = lib.create()
-        TDLibManager.log("TDLib client created.")
-        self.receiveThread = Thread(target: self, selector: #selector(receiveLoop), object: nil)
-        self.receiveThread?.name = "tg.tdlib.receive"
-        self.receiveThread?.start()
+        client = ptr
+        TDLibManager.log("TDLib client created (raw pointer: \(ptr)).")
+        receiveThread = Thread(target: self, selector: #selector(receiveLoop), object: nil)
+        receiveThread?.name = "tg.tdlib.receive"
+        receiveThread?.start()
 
         // Kick off auth param init.
         sendParameters()
@@ -148,7 +136,6 @@ final class TDLibManager {
     }
 
     func pause() {
-        // Tell TDLib to flush network — we are going to background.
         send(function: "setNetworkType", parameters: [
             "network_type": ["@type": "network_type_none"]
         ])
@@ -180,8 +167,7 @@ final class TDLibManager {
         send(payload: payload)
     }
 
-    /// Fire-and-forget send — no completion handler. Use for updates /
-    /// background things.
+    /// Fire-and-forget send — no completion handler.
     func send(function: String, parameters: [String: Any]) {
         var payload: [String: Any] = ["@type": function]
         for (k, v) in parameters { payload[k] = v }
@@ -189,17 +175,17 @@ final class TDLibManager {
     }
 
     private func send(payload: [String: Any]) {
-        guard !TDLibManager.useMockData, let client = client else {
+        guard let client = client else {
             TDLibManager.log("send() skipped — client is nil (TDLib not started). Payload @type=\(payload["@type"] ?? "?")")
             return
         }
         sendQueue.async { [weak self] in
             guard let self = self,
-                  let lib = self.loadTDLib(),
                   let data = try? JSONSerialization.data(withJSONObject: payload),
                   let str = String(data: data, encoding: .utf8) else { return }
             str.withCString { cstr in
-                lib.send(client, cstr)
+                // void td_json_client_send(void *client, const char *request)
+                td_json_client_send(client, cstr)
             }
         }
     }
@@ -207,16 +193,14 @@ final class TDLibManager {
     // MARK: - Receive loop (background thread)
 
     @objc private func receiveLoop() {
-        guard let lib = loadTDLib(), let client = client else { return }
+        guard let client = client else { return }
         while true {
-            guard let cstr = lib.receive(client, 1.0) else { continue }
-            let str = String(cString: cstr)
-            // td_json_client_receive — caller must free? In JSON mode, the
-            // returned C string is allocated by TDLib and freed by it on
-            // the next receive call. We just consume the string here.
-            // (Note: some bindings require `free(ptr)` — TDLib's JSON client
-            // does NOT; it pools buffers internally.)
-            handle(raw: str)
+            // const char *td_json_client_receive(void *client, double timeout)
+            // Returns NULL on timeout — keep looping.
+            if let rawPtr = td_json_client_receive(client, 1.0) {
+                let str = String(cString: rawPtr)
+                handle(raw: str)
+            }
         }
     }
 
@@ -332,7 +316,6 @@ final class TDLibManager {
             "files_directory": documentsPath("tdlib-files")
         ]
         send(function: "setTdlibParameters", parameters: params)
-        // Do NOT call setAuthenticationPhoneNumber here — wait for user.
     }
 
     // MARK: - Device token
@@ -346,70 +329,6 @@ final class TDLibManager {
             ],
             "other_user_ids": []
         ])
-    }
-
-    // MARK: - Dynamic load of libtdjson
-
-    private var cachedLib: (create: td_create_client,
-                           receive: td_receive,
-                           send:    td_send,
-                           execute: td_execute,
-                           destroy: td_destroy)?
-
-    private func loadTDLib() -> (create: td_create_client,
-                                 receive: td_receive,
-                                 send:    td_send,
-                                 execute: td_execute,
-                                 destroy: td_destroy)? {
-        if let l = cachedLib { return l }
-
-        // Try the bundled path first (when linked into the binary).
-        if let handle = dlopen(nil, RTLD_LAZY),
-           let createSym = dlsym(handle, "td_json_client_create") {
-            guard let sendSym    = dlsym(handle, "td_json_client_send"),
-                  let recvSym   = dlsym(handle, "td_json_client_receive"),
-                  let execSym   = dlsym(handle, "td_json_client_execute"),
-                  let destroySym = dlsym(handle, "td_json_client_destroy") else {
-                return nil
-            }
-            let l = (
-                create:   unsafeBitCast(createSym,    to: td_create_client.self),
-                receive:  unsafeBitCast(recvSym,      to: td_receive.self),
-                send:     unsafeBitCast(sendSym,     to: td_send.self),
-                execute:  unsafeBitCast(execSym,     to: td_execute.self),
-                destroy:  unsafeBitCast(destroySym,  to: td_destroy.self)
-            )
-            cachedLib = l
-            return l
-        }
-
-        // Try dynamic load from app bundle (e.g. via pod 'TDLibKit')
-        let candidates = [
-            "@executable_path/Frameworks/libtdjson.dylib",
-            "@loader_path/Frameworks/libtdjson.dylib",
-            "/usr/lib/libtdjson.dylib"
-        ]
-        for path in candidates {
-            if let handle = dlopen(path, RTLD_LAZY),
-               let createSym = dlsym(handle, "td_json_client_create") {
-                guard let sendSym   = dlsym(handle, "td_json_client_send"),
-                      let recvSym   = dlsym(handle, "td_json_client_receive"),
-                      let execSym   = dlsym(handle, "td_json_client_execute"),
-                      let destroySym = dlsym(handle, "td_json_client_destroy") else {
-                    continue
-                }
-                let l = (
-                    create:   unsafeBitCast(createSym,    to: td_create_client.self),
-                    receive:  unsafeBitCast(recvSym,      to: td_receive.self),
-                    send:     unsafeBitCast(sendSym,     to: td_send.self),
-                    execute:  unsafeBitCast(execSym,     to: td_execute.self),
-                    destroy:  unsafeBitCast(destroySym,  to: td_destroy.self)
-                )
-                cachedLib = l
-                return l
-            }
-        }
-        return nil
     }
 
     private func documentsPath(_ sub: String) -> String {

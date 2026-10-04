@@ -66,16 +66,18 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "13.0"
         GCC_WARN_ABOUT_RETURN_TYPE: YES_ERROR
         SWIFT_DISABLE_SAFETY_CHECKS: NO
-        # Tell the linker to look for libtdjson in the Frameworks folder.
-        # If you drop libtdjson.xcframework there, this will pick it up.
+        # Framework search paths — used when libtdjson.xcframework is
+        # manually dropped into TelegramLite/Frameworks/. With SPM dep
+        # on Swiftgram/TDLibFramework, this isn't needed but harmless.
         FRAMEWORK_SEARCH_PATHS:
           - "$(inherited)"
           - "$(SRCROOT)/TelegramLite/Frameworks"
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
-        # Force-load the static archive so all symbols end up in the binary,
-        # even those not directly referenced (we look them up via dlsym).
+        # Force-load the static archive from SPM so all TDLib symbols
+        # end up in the binary, even those not directly referenced by
+        # Swift code (we look them up via dlsym at runtime as a fallback).
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-ObjC"
