@@ -1,0 +1,82 @@
+# TelegramLite — XcodeGen project definition
+#
+# Generate the .xcodeproj with:
+#   brew install xcodegen
+#   xcodegen generate
+#
+# Why XcodeGen: cleanly expresses project structure in YAML — Xcode regenerates
+# .pbxproj on every save otherwise. XcodeGen is a single brew binary, no GUI.
+#
+# TDLib integration:
+#   This project does NOT pin a TDLib SPM/CocoaPods dependency in this file
+#   because community TDLib Swift packages are unreliable (URLs break). You
+#   add TDLib manually — see README.md → "Where to get TDLib".
+#   After you drop libtdjson.xcframework into TelegramLite/Frameworks/,
+#   uncomment the `dependencies:` block below.
+
+name: TelegramLite
+options:
+  bundleIdPrefix: app.lite
+  deploymentTarget:
+    iOS: "11.0"
+  createIntermediateGroups: true
+  defaultConfig: Debug
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    IPHONEOS_DEPLOYMENT_TARGET: "11.0"
+    ENABLE_BITCODE: NO
+    DEVELOPMENT_LANGUAGE: en
+    CLANG_ENABLE_MODULES: YES
+    CODE_SIGN_STYLE: Manual
+    PROVISIONING_PROFILE_SPECIFIER: ""
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+
+targets:
+  TelegramLite:
+    type: application
+    platform: iOS
+    deploymentTarget: "11.0"
+    sources:
+      - path: TelegramLite
+        excludes:
+          - "Info.plist"
+    resources:
+      - TelegramLite/Resources/Assets.xcassets
+      - TelegramLite/Resources/LaunchScreen.storyboard
+    info:
+      path: TelegramLite/Info.plist
+      properties:
+        CFBundleDisplayName: Lite
+        UILaunchStoryboardName: LaunchScreen
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.lite.telegramlite
+        INFOPLIST_FILE: TelegramLite/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        SWIFT_OBJC_INTERFACE_HEADER_NAME: ""
+        ENABLE_BITCODE: NO
+        SWIFT_OPTIMIZATION_LEVEL: "-Osize"
+        IPHONEOS_DEPLOYMENT_TARGET: "11.0"
+        GCC_WARN_ABOUT_RETURN_TYPE: YES_ERROR
+        SWIFT_DISABLE_SAFETY_CHECKS: NO
+        # Tell the linker to look for libtdjson in the Frameworks folder.
+        # If you drop libtdjson.xcframework there, this will pick it up.
+        FRAMEWORK_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/TelegramLite/Frameworks"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+
+    # Uncomment after dropping libtdjson.xcframework into TelegramLite/Frameworks/
+    # dependencies:
+    #   - framework: TelegramLite/Frameworks/libtdjson.xcframework
+    #     embed: true
+    #     codeSignOnCopy: true

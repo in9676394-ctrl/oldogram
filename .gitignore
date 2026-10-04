@@ -1,0 +1,38 @@
+# Xcode
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+DerivedData/
+build/
+
+# SPM
+.swiftpm/
+Package.resolved
+.build/
+
+# CocoaPods (if you used `pod install`)
+Pods/
+*.xcworkspace
+TelegramLite.xcodeproj
+
+# Bundler / Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Secrets / signing
+*.mobileprovision
+*.cer
+*.p12
+*.pem
+.env
+secrets.json
+
+# Output ipa
+*.ipa
